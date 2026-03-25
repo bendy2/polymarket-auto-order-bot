@@ -108,12 +108,25 @@ class MarketDataRecorder:
             condition_id = market.get("conditionId")
             clob_tokens = market.get("clobTokenIds", [])
             
-            # 有时候clobTokenIds是嵌套数组，需要取出实际id
+            # 处理Gamma API返回的各种格式
+            # 格式1: ["id1", "id2"]
+            # 格式2: [["id1"], ["id2"]]
+            # 格式3: 直接字符串
+            def extract_token(t):
+                if isinstance(t, list):
+                    return extract_token(t[0]) if t else None
+                return str(t)
+            
             if len(clob_tokens) >= 2:
-                yes_token_id = clob_tokens[0][0] if isinstance(clob_tokens[0], list) else clob_tokens[0]
-                no_token_id = clob_tokens[1][0] if isinstance(clob_tokens[1], list) else clob_tokens[1]
+                yes_token_id = extract_token(clob_tokens[0])
+                no_token_id = extract_token(clob_tokens[1])
             else:
                 print(f"[RECORDER] Not enough tokens for {slug}, got {len(clob_tokens)}")
+                print(f"[RECORDER] Raw clob_tokens: {clob_tokens}")
+                return None
+            
+            if not yes_token_id or not no_token_id:
+                print(f"[RECORDER] Failed to extract token IDs for {slug}")
                 return None
             
             # 第一个token是 UP (YES), 第二个是 DOWN (NO)
