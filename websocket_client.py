@@ -147,24 +147,24 @@ class PolymarketWebsocketClient:
     def _process_market_message(self, data: Dict) -> None:
         """处理单条市场消息"""
         msg_type = data.get("type")
+        
+        if msg_type == "best_bid_ask":
+            # 最优买卖价格更新
+            token_id = data.get("asset_id")
+            best_bid = float(data.get("best_bid", 0))
+            best_ask = float(data.get("best_ask", 0))
+            last_price = float(data.get("last_price", 0)) if data.get("last_price") else None
+            timestamp = data.get("timestamp", int(time.time() * 1000))
             
-            if msg_type == "best_bid_ask":
-                # 最优买卖价格更新
-                token_id = data.get("asset_id")
-                best_bid = float(data.get("best_bid", 0))
-                best_ask = float(data.get("best_ask", 0))
-                last_price = float(data.get("last_price", 0)) if data.get("last_price") else None
-                timestamp = data.get("timestamp", int(time.time() * 1000))
-                
-                if self.on_price_change:
-                    update = PriceUpdate(
-                        token_id=token_id,
-                        best_bid=best_bid,
-                        best_ask=best_ask,
-                        last_price=last_price,
-                        timestamp=timestamp
-                    )
-                    self.on_price_change(update)
+            if self.on_price_change:
+                update = PriceUpdate(
+                    token_id=token_id,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    last_price=last_price,
+                    timestamp=timestamp
+                )
+                self.on_price_change(update)
             
             elif msg_type == "last_trade_price":
                 # 最新成交价格
