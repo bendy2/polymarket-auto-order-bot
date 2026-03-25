@@ -289,13 +289,34 @@ class MarketDataRecorder:
         
         # 更新价格缓存
         mid_price = (update.best_bid + update.best_ask) / 2
-        # 查找当前活跃窗口
-        for symbol, active_window in self.active_windows.items():
-            if active_window.get("yes_token_id") == token_id:
-                self.latest_yes_prices[token_id] = mid_price
-                return
-            if active_window.get("no_token_id") == token_id:
-                self.latest_no_prices[token_id] = mid_price
+        if token_id in self.latest_yes_prices:
+            self.latest_yes_prices[token_id] = mid_price
+        else:
+            self.latest_no_prices[token_id] = mid_price
+        
+        # 实时价格更新也写入采样（WSS推送就记录）
+        for symbol, active_window in list(self.active_windows.items()):
+            yes_token = active_window.get("yes_token_id")
+            no_token = active_window.get("no_token_id")
+            
+            if token_id == yes_token or token_id == no_token:
+                binance_price = self.latest_binance_prices.get(symbol)
+                if binance_price is None:
+                    continue
+                
+                # 记录实时WSS推送的价格
+                sample = {
+                    "timestamp_ms": int(time.time() * 1000),
+                    "binance_price": binance_price,
+                    "yes_mid_price": self.latest_yes_prices.get(yes_token) if yes_token else None,
+                    "no_mid_price": self.latest_no_prices.get(no_token) if no_token else None,
+                    "yes_best_bid": update.best_bid if token_id == yes_token else None,
+                    "yes_best_ask": update.best_ask if token_id == yes_token else None,
+                    "no_best_bid": update.best_bid if token_id == no_token else None,
+                    "no_best_ask": update.best_ask if token_id == no_token else None,
+                    "source": "websocket"
+                }
+                active_window["samples"].append(sample)
                 return
     
     def _sample_loop(self) -> None:
@@ -319,7 +340,8 @@ class MarketDataRecorder:
                     "yes_best_bid": None,
                     "yes_best_ask": None,
                     "no_best_bid": None,
-                    "no_best_ask": None
+                    "no_best_ask": None,
+                    "source": "polling"
                 }
                 
                 # 如果 WebSocket 没有更新，通过 REST API 获取
