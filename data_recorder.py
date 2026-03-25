@@ -108,14 +108,18 @@ class MarketDataRecorder:
             condition_id = market.get("conditionId")
             clob_tokens = market.get("clobTokenIds", [])
             
-            if len(clob_tokens) < 2:
-                print(f"[RECORDER] Not enough tokens for {slug}")
+            # 有时候clobTokenIds是嵌套数组，需要取出实际id
+            if len(clob_tokens) >= 2:
+                yes_token_id = clob_tokens[0][0] if isinstance(clob_tokens[0], list) else clob_tokens[0]
+                no_token_id = clob_tokens[1][0] if isinstance(clob_tokens[1], list) else clob_tokens[1]
+            else:
+                print(f"[RECORDER] Not enough tokens for {slug}, got {len(clob_tokens)}")
                 return None
             
             # 第一个token是 UP (YES), 第二个是 DOWN (NO)
             return {
-                "yes_token_id": clob_tokens[0],
-                "no_token_id": clob_tokens[1],
+                "yes_token_id": yes_token_id,
+                "no_token_id": no_token_id,
                 "condition_id": condition_id,
                 "event_slug": slug
             }
