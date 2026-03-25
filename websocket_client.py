@@ -152,7 +152,7 @@ class PolymarketWebsocketClient:
             # 最优买卖价格更新
             token_id = data.get("asset_id")
             best_bid = float(data.get("best_bid", 0))
-            best_ask = float(data.get("best_ask", 0))
+            best_ask = float(data.get("best_bid", 0))
             last_price = float(data.get("last_price", 0)) if data.get("last_price") else None
             timestamp = data.get("timestamp", int(time.time() * 1000))
             
@@ -165,25 +165,22 @@ class PolymarketWebsocketClient:
                     timestamp=timestamp
                 )
                 self.on_price_change(update)
-            
-            elif msg_type == "last_trade_price":
-                # 最新成交价格
-                token_id = data.get("asset_id")
-                price = float(data.get("price", 0))
-                print(f"[Market WS] Last trade {token_id}: {price}")
-            
-            elif msg_type == "market_resolved":
-                print(f"[Market WS] Market resolved: {data.get('condition_id')}")
-            
-            elif msg_type == "new_market":
-                print(f"[Market WS] New market: {data.get('condition_id')}")
-            
-            else:
-                # print(f"[Market WS] Unhandled message: {msg_type}")
-                pass
         
-        except Exception as e:
-            print(f"[Market WS] Error processing message: {e}")
+        elif msg_type == "last_trade_price":
+            # 最新成交价格
+            token_id = data.get("asset_id")
+            price = float(data.get("price", 0))
+            print(f"[Market WS] Last trade {token_id}: {price}")
+        
+        elif msg_type == "market_resolved":
+            print(f"[Market WS] Market resolved: {data.get('condition_id')}")
+        
+        elif msg_type == "new_market":
+            print(f"[Market WS] New market: {data.get('condition_id')}")
+        
+        else:
+            # print(f"[Market WS] Unhandled message: {msg_type}")
+            pass
     
     def _on_market_open(self, ws: websocket.WebSocketApp) -> None:
         """市场频道连接打开"""
