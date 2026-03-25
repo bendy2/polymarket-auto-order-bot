@@ -216,7 +216,8 @@ class MarketDataRecorder:
         self.latest_binance_prices[symbol] = kline.close
         
         # 如果是新窗口第一个更新，启动窗口 (Kline.start_time 是对齐过的整5分钟)
-        if not self.active_windows.get(symbol) and kline.start_time == (kline.timestamp // 1000 // 300) * 300 * 1000:
+        current_time_sec = int(time.time())
+        if not self.active_windows.get(symbol) and kline.start_time == (current_time_sec // 300) * 300 * 1000:
             self._start_new_window(symbol, kline.start_time, kline.open)
     
     def _start_new_window(self, symbol: str, start_time_ms: int, strike_price: float) -> None:
