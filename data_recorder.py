@@ -8,11 +8,16 @@ Polymarket 加密货币 5 分钟 UP/DOWN 市场数据记录器
 - YES/NO 代币实时中间价（定时采样）
 - 对应币种实时 Binance 价格（定时采样）
 - 最终结果（UP/DOWN）
+
+自动处理:
+- 每个 5 分钟窗口新开自动生成 slug 查询 Gamma API 获取 token_id
+- 不需要手动更新配置文件，自动换周��
 """
 import os
 import json
 import time
 import sqlite3
+import requests
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
@@ -23,44 +28,30 @@ from binance_ws_client import BinanceFuturesWebsocketClient, KlineData
 from websocket_client import PolymarketWebsocketClient, PriceUpdate
 
 
+GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+
+
 class MarketDataRecorder:
     """
     5分钟 UP/DOWN 市场数据记录器
     对应 Binance 5分钟K线收盘，记录 Polymarket 数据和最终结果
+    自动获取每个新窗口的 slug/token_id/condition_id
     """
     
-    # 你需要提前在这里配置每个币种对应的 Polymarket YES/NO token ID
-    # 格式: {
-    #   "BTCUSDT": {
-    #       "yes_token_id": "...",
-    #       "no_token_id": "...",
-    #       "condition_id": "..."
-    #   }, ...
-    # }
-    # 可以从 Polymarket 市场页面获取 token ID
-    DEFAULT_CONFIG = {
-        "BTCUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None},
-        "ETHUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None},
-        "SOLUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None},
-        "XRPUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None},
-        "BNBUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None},
-        "DOGEUSDT": {"yes_token_id": None, "no_token_id": None, "condition_id": None}
-    }
+    # 币种列表 (不含USDT后缀)
+    SYMBOLS = [
+        "BTC", "ETH", "SOL", "XRP", "BNB", "DOGE"
+    ]
 
     def __init__(
         self,
         db_path: str = "polymarket_data.db",
-        config_path: str = "market_config.json",
         sample_interval: int = 60,  # 采样间隔（秒），每个5分钟窗口采样多次
     ):
         load_dotenv()
         
         self.db_path = db_path
-        self.config_path = config_path
         self.sample_interval = sample_interval
-        
-        # 加载市场配置
-        self.market_config = self._load_market_config()
         
         # 初始化数据库
         self._init_db()
@@ -90,17 +81,47 @@ class MarketDataRecorder:
         self.latest_yes_prices: Dict[str, float] = {}
         self.latest_no_prices: Dict[str, float] = {}
     
-    def _load_market_config(self) -> Dict:
-        """加载市场配置，如果不存在创建默认"""
-        if os.path.exists(self.config_path):
-            with open(self.config_path, "r") as f:
-                return json.load(f)
-        else:
-            with open(self.config_path, "w") as f:
-                json.dump(self.DEFAULT_CONFIG, f, indent=2)
-            print(f"[RECORDER] Created default market config at {self.config_path}")
-            print(f"[RECORDER] Please fill in token IDs for each market before starting")
-            return self.DEFAULT_CONFIG
+    # ============ 自动获取市场信息 ============
+    
+    def generate_slug(self, symbol: str, start_timestamp: int) -> str:
+        """生成 slug: {币名小写}-updown-5m-{开始时间戳(秒)}"""
+        symbol_short = symbol.replace("USDT", "").lower()
+        return f"{symbol_short}-updown-5m-{start_timestamp}"
+    
+    def get_market_info_by_slug(self, slug: str) -> Optional[Dict]:
+        """通过slug查询市场信息，获取token_id"""
+        url = f"{GAMMA_API_BASE}/events/slug/{slug}"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                print(f"[RECORDER] Failed to get market {slug}, status={resp.status_code}")
+                return None
+            
+            data = resp.json()
+            if not data.get("markets"):
+                print(f"[RECORDER] No markets found for {slug}")
+                return None
+            
+            # 提取token id
+            market = data["markets"][0]
+            condition_id = market.get("conditionId")
+            clob_tokens = market.get("clobTokenIds", [])
+            
+            if len(clob_tokens) < 2:
+                print(f"[RECORDER] Not enough tokens for {slug}")
+                return None
+            
+            # 第一个token是 UP (YES), 第二个是 DOWN (NO)
+            return {
+                "yes_token_id": clob_tokens[0],
+                "no_token_id": clob_tokens[1],
+                "condition_id": condition_id,
+                "event_slug": slug
+            }
+            
+        except Exception as e:
+            print(f"[RECORDER] Error querying market {slug}: {e}")
+            return None
     
     def _init_db(self) -> None:
         """初始化 SQLite 数据库"""
@@ -181,15 +202,10 @@ class MarketDataRecorder:
     def _on_binance_kline_closed(self, kline: KlineData) -> None:
         """Binance K线收盘，处理 Polymarket 窗口结束"""
         symbol = kline.symbol
-        config = self.market_config.get(symbol)
-        if not config or not config.get("yes_token_id"):
-            return
-        
         # 获取当前活跃窗口
         active_window = self.active_windows.get(symbol)
         if not active_window:
-            print(f"[RECORDER] No active window for {symbol}, starting new")
-            self._start_new_window(symbol, kline.start_time, kline.open)
+            print(f"[RECORDER] No active window for {symbol}, skipping")
             return
         
         # 窗口结束，计算最终结果
@@ -208,9 +224,9 @@ class MarketDataRecorder:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 symbol,
-                config.get("condition_id"),
-                config.get("yes_token_id"),
-                config.get("no_token_id"),
+                active_window.get("condition_id"),
+                active_window.get("yes_token_id"),
+                active_window.get("no_token_id"),
                 active_window["start_time"],
                 kline.close_time,
                 active_window["strike_price"],
@@ -242,17 +258,39 @@ class MarketDataRecorder:
             self._start_new_window(symbol, kline.start_time * 1000, kline.open)
     
     def _start_new_window(self, symbol: str, start_time_ms: int, strike_price: float) -> None:
-        """开始一个新的5分钟窗口"""
-        config = self.market_config.get(symbol)
-        if not config or not config.get("yes_token_id"):
+        """开始一个新的5分钟窗口，自动查询slug获取token信息"""
+        start_time_sec = int(start_time_ms / 1000)
+        slug = self.generate_slug(symbol, start_time_sec)
+        
+        print(f"[RECORDER] New window for {symbol}, querying {slug}...")
+        market_info = self.get_market_info_by_slug(slug)
+        
+        if not market_info:
+            print(f"[RECORDER] Failed to get market info for {symbol}, skipping window")
             return
+        
+        # 获取token，订阅Polymarket价格更新
+        yes_token = market_info["yes_token_id"]
+        no_token = market_info["no_token_id"]
+        
+        # 如果Polymarket WS已经连接，订阅新token
+        if self.polymarket_ws and self.polymarket_ws.market_connected:
+            self.polymarket_ws.subscribe_markets([yes_token, no_token])
         
         self.active_windows[symbol] = {
             "start_time": start_time_ms,
-            "strike_price": strike_price
+            "strike_price": strike_price,
+            "yes_token_id": yes_token,
+            "no_token_id": no_token,
+            "condition_id": market_info["condition_id"],
+            "slug": slug
         }
         
-        print(f"[RECORDER] New window started for {symbol} | start={datetime.fromtimestamp(start_time_ms/1000)} strike={strike_price:.2f}")
+        print(f"[RECORDER] New window started for {symbol}:")
+        print(f"  start={datetime.fromtimestamp(start_time_ms/1000)}")
+        print(f"  strike={strike_price:.2f}")
+        print(f"  YES token={yes_token}")
+        print(f"  NO token={no_token}")
     
     def _on_polymarket_price_update(self, update: PriceUpdate) -> None:
         """Polymarket 价格更新"""
@@ -284,12 +322,8 @@ class MarketDataRecorder:
         while True:
             # 对每个活跃窗口进行采样
             for symbol, active_window in self.active_windows.items():
-                config = self.market_config.get(symbol)
-                if not config:
-                    continue
-                
-                yes_token = config.get("yes_token_id")
-                no_token = config.get("no_token_id")
+                yes_token = active_window.get("yes_token_id")
+                no_token = active_window.get("no_token_id")
                 
                 binance_price = self.latest_binance_prices.get(symbol)
                 if binance_price is None:
@@ -351,7 +385,7 @@ class MarketDataRecorder:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         symbol,
-                        config.get("condition_id"),
+                        active_window.get("condition_id"),
                         yes_token,
                         no_token,
                         active_window["start_time"],
@@ -391,20 +425,8 @@ class MarketDataRecorder:
     
     def start(self) -> None:
         """启动记录器"""
-        # 检查配置是否完整
-        missing = []
-        symbols = list(self.market_config.keys())
-        for symbol, cfg in self.market_config.items():
-            if not cfg.get("yes_token_id") or not cfg.get("no_token_id"):
-                missing.append(symbol)
-        
-        if missing:
-            print(f"[RECORDER] ERROR: Missing token IDs for symbols: {missing}")
-            print(f"[RECORDER] Please fill them in {self.config_path}")
-            return
-        
         # 启动 Binance WebSocket
-        symbols_to_subscribe = list(self.market_config.keys())
+        symbols_to_subscribe = [f"{s}USDT" for s in self.SYMBOLS]
         print(f"[RECORDER] Starting Binance WebSocket for: {symbols_to_subscribe}")
         
         self.binance_client = BinanceFuturesWebsocketClient(
@@ -416,13 +438,6 @@ class MarketDataRecorder:
         
         # 启动 Polymarket WebSocket 订阅价格
         print("[RECORDER] Starting Polymarket WebSocket for YES/NO prices")
-        all_tokens = []
-        for cfg in self.market_config.values():
-            if cfg.get("yes_token_id"):
-                all_tokens.append(cfg["yes_token_id"])
-            if cfg.get("no_token_id"):
-                all_tokens.append(cfg["no_token_id"])
-        
         self.polymarket_ws = PolymarketWebsocketClient(
             api_key=self.api_key,
             api_secret=self.api_secret,
