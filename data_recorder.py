@@ -106,23 +106,33 @@ class MarketDataRecorder:
             # 提取token id
             market = data["markets"][0]
             condition_id = market.get("conditionId")
-            clob_tokens = market.get("clobTokenIds", [])
+            clob_tokens_raw = market.get("clobTokenIds", [])
             
-            # 处理Gamma API返回的各种格式
-            # 格式1: ["id1", "id2"]
-            # 格式2: [["id1"], ["id2"]]
-            # 格式3: 直接字符串
+            # Gamma API 各种奇葩格式处理:
+            # 1. 已经是数组 ["id1", "id2"] ✓
+            # 2. 整个是字符串 "[\"id1\", \"id2\"]" 需要 json.loads
+            # 3. 嵌套数组 [["id1"], ["id2"]]
+            if isinstance(clob_tokens_raw, str):
+                import json
+                try:
+                    clob_tokens = json.loads(clob_tokens_raw)
+                except:
+                    clob_tokens = []
+            else:
+                clob_tokens = clob_tokens_raw
+            
+            # 递归提取token
             def extract_token(t):
                 if isinstance(t, list):
                     return extract_token(t[0]) if t else None
-                return str(t)
+                return str(t).strip('"\' ')  # 去掉引号
             
             if len(clob_tokens) >= 2:
                 yes_token_id = extract_token(clob_tokens[0])
                 no_token_id = extract_token(clob_tokens[1])
             else:
                 print(f"[RECORDER] Not enough tokens for {slug}, got {len(clob_tokens)}")
-                print(f"[RECORDER] Raw clob_tokens: {clob_tokens}")
+                print(f"[RECORDER] Raw clob_tokens: {clob_tokens_raw}")
                 return None
             
             if not yes_token_id or not no_token_id:
