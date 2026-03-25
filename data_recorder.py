@@ -270,8 +270,8 @@ class MarketDataRecorder:
         print(f"[RECORDER] New window started for {symbol}:")
         print(f"  start={datetime.fromtimestamp(start_time_ms/1000)} UTC")
         print(f"  strike={strike_price:.2f}")
-        print(f"  YES token={yes_token}")
-        print(f"  NO token={no_token}")
+        print(f"  YES token={str(yes_token)}")
+        print(f"  NO token={str(no_token)}")
     
     def _on_polymarket_price_update(self, update: PriceUpdate) -> None:
         """Polymarket 价格更新"""
