@@ -135,7 +135,18 @@ class PolymarketWebsocketClient:
         """处理市场频道消息"""
         try:
             data = json.loads(message)
-            msg_type = data.get("type")
+            # 处理批量消息
+            if isinstance(data, list):
+                for item in data:
+                    self._process_market_message(item)
+            else:
+                self._process_market_message(data)
+        except Exception as e:
+            print(f"[Market WS] Error processing message: {e}")
+    
+    def _process_market_message(self, data: Dict) -> None:
+        """处理单条市场消息"""
+        msg_type = data.get("type")
             
             if msg_type == "best_bid_ask":
                 # 最优买卖价格更新
