@@ -32,3 +32,4 @@ wheels/
 venv/
 env/
 .venv
+data/

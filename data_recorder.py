@@ -11,12 +11,12 @@ Polymarket 加密货币 5 分钟 UP/DOWN 市场数据记录器
 
 自动处理:
 - 每个 5 分钟窗口新开自动生成 slug 查询 Gamma API 获取 token_id
-- 不需要手动更新配置文件，自动换周��
+- 不需要手动更新配置文件，自动切换周期
+- 每个币种所有窗口保存在一个 JSONL 文件，每个窗口一行
 """
 import os
 import json
 import time
-import sqlite3
 import requests
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -36,6 +36,7 @@ class MarketDataRecorder:
     5分钟 UP/DOWN 市场数据记录器
     对应 Binance 5分钟K线收盘，记录 Polymarket 数据和最终结果
     自动获取每个新窗口的 slug/token_id/condition_id
+    每个币种保存为单独的 JSONL 文件，每个窗口一行
     """
     
     # 币种列表 (不含USDT后缀)
@@ -45,16 +46,16 @@ class MarketDataRecorder:
 
     def __init__(
         self,
-        db_path: str = "polymarket_data.db",
+        data_dir: str = "data",
         sample_interval: int = 60,  # 采样间隔（秒），每个5分钟窗口采样多次
     ):
         load_dotenv()
         
-        self.db_path = db_path
+        self.data_dir = data_dir
         self.sample_interval = sample_interval
         
-        # 初始化数据库
-        self._init_db()
+        # 创建数据目录
+        os.makedirs(self.data_dir, exist_ok=True)
         
         # 初始化 Polymarket 客户端
         self.host = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
@@ -123,48 +124,19 @@ class MarketDataRecorder:
             print(f"[RECORDER] Error querying market {slug}: {e}")
             return None
     
-    def _init_db(self) -> None:
-        """初始化 SQLite 数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    def _get_output_path(self, symbol: str) -> str:
+        """获取对应币种的JSONL输出路径"""
+        return os.path.join(self.data_dir, f"{symbol.lower()}_windows.jsonl")
+    
+    def _append_window_to_jsonl(self, window_data: Dict) -> None:
+        """将完整窗口追加到JSONL文件，每个窗口一行"""
+        symbol = window_data["symbol"]
+        path = self._get_output_path(symbol)
         
-        # 创建窗口表
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS market_windows (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                condition_id TEXT,
-                yes_token_id TEXT,
-                no_token_id TEXT,
-                start_time INTEGER NOT NULL,
-                end_time INTEGER NOT NULL,
-                strike_price REAL NOT NULL,
-                final_result TEXT,
-                created_at INTEGER NOT NULL,
-                UNIQUE(symbol, start_time)
-            )
-        """)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(window_data) + "\n")
         
-        # 创建采样数据表（每个窗口多次采样）
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS samples (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                window_id INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                binance_price REAL NOT NULL,
-                yes_mid_price REAL,
-                no_mid_price REAL,
-                yes_best_bid REAL,
-                yes_best_ask REAL,
-                no_best_bid REAL,
-                no_best_ask REAL,
-                FOREIGN KEY(window_id) REFERENCES market_windows(id)
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
-        print(f"[RECORDER] Database initialized at {self.db_path}")
+        print(f"[RECORDER] Window saved to {path}")
     
     def _init_clob(self) -> None:
         """初始化 Clob 客户端"""
@@ -213,37 +185,27 @@ class MarketDataRecorder:
         # DOWN = 收盘价 <= 行权价
         final_result = "UP" if kline.close > active_window["strike_price"] else "DOWN"
         
-        # 保存到数据库
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        # 组装完整窗口数据
+        window_data = {
+            "symbol": symbol,
+            "condition_id": active_window.get("condition_id"),
+            "yes_token_id": active_window.get("yes_token_id"),
+            "no_token_id": active_window.get("no_token_id"),
+            "slug": active_window.get("slug"),
+            "start_time_ms": active_window["start_time"],
+            "end_time_ms": kline.close_time,
+            "strike_price": active_window["strike_price"],
+            "final_close_price": kline.close,
+            "final_result": final_result,
+            "samples": active_window.get("samples", []),
+            "created_at_ms": int(time.time() * 1000)
+        }
         
-        try:
-            cursor.execute("""
-                INSERT OR REPLACE INTO market_windows
-                (symbol, condition_id, yes_token_id, no_token_id, start_time, end_time, strike_price, final_result, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                symbol,
-                active_window.get("condition_id"),
-                active_window.get("yes_token_id"),
-                active_window.get("no_token_id"),
-                active_window["start_time"],
-                kline.close_time,
-                active_window["strike_price"],
-                final_result,
-                int(time.time())
-            ))
-            
-            window_id = cursor.lastrowid
-            conn.commit()
-            
-            print(f"[RECORDER] Window closed for {symbol}: {final_result} | strike={active_window['strike_price']:.2f} close={kline.close:.2f} (window_id={window_id})")
+        # 保存到 JSONL
+        self._append_window_to_jsonl(window_data)
         
-        except Exception as e:
-            print(f"[RECORDER] Error saving window: {e}")
-            conn.rollback()
-        
-        conn.close()
+        print(f"[RECORDER] Window closed for {symbol}: {final_result} | "
+              f"strike={active_window['strike_price']:.2f} close={kline.close:.2f}")
         
         # 清除活跃窗口，下一个K线会开始新窗口
         del self.active_windows[symbol]
@@ -253,9 +215,9 @@ class MarketDataRecorder:
         symbol = kline.symbol
         self.latest_binance_prices[symbol] = kline.close
         
-        # 如果是新窗口第一个更新，启动窗口
-        if not self.active_windows.get(symbol) and kline.start_time == kline.timestamp // 1000 * 1000:
-            self._start_new_window(symbol, kline.start_time * 1000, kline.open)
+        # 如果是新窗口第一个更新，启动窗口 (Kline.start_time 是对齐过的整5分钟)
+        if not self.active_windows.get(symbol) and kline.start_time == (kline.timestamp // 1000 // 300) * 300 * 1000:
+            self._start_new_window(symbol, kline.start_time, kline.open)
     
     def _start_new_window(self, symbol: str, start_time_ms: int, strike_price: float) -> None:
         """开始一个新的5分钟窗口，自动查询slug获取token信息"""
@@ -283,11 +245,12 @@ class MarketDataRecorder:
             "yes_token_id": yes_token,
             "no_token_id": no_token,
             "condition_id": market_info["condition_id"],
-            "slug": slug
+            "slug": slug,
+            "samples": []
         }
         
         print(f"[RECORDER] New window started for {symbol}:")
-        print(f"  start={datetime.fromtimestamp(start_time_ms/1000)}")
+        print(f"  start={datetime.fromtimestamp(start_time_ms/1000)} UTC")
         print(f"  strike={strike_price:.2f}")
         print(f"  YES token={yes_token}")
         print(f"  NO token={no_token}")
@@ -296,32 +259,22 @@ class MarketDataRecorder:
         """Polymarket 价格更新"""
         token_id = update.token_id
         
-        # 找出属于哪个币种对
-        symbol = None
-        side = None
-        for sym, cfg in self.market_config.items():
-            if cfg.get("yes_token_id") == token_id:
-                symbol = sym
-                side = "yes"
-                break
-            if cfg.get("no_token_id") == token_id:
-                symbol = sym
-                side = "no"
-                break
-        
-        if not symbol:
-            return
-        
-        if side == "yes":
-            self.latest_yes_prices[token_id] = (update.best_bid + update.best_ask) / 2
-        else:
-            self.latest_no_prices[token_id] = (update.best_bid + update.best_ask) / 2
+        # 更新价格缓存
+        mid_price = (update.best_bid + update.best_ask) / 2
+        # 查找当前活跃窗口
+        for symbol, active_window in self.active_windows.items():
+            if active_window.get("yes_token_id") == token_id:
+                self.latest_yes_prices[token_id] = mid_price
+                return
+            if active_window.get("no_token_id") == token_id:
+                self.latest_no_prices[token_id] = mid_price
+                return
     
     def _sample_loop(self) -> None:
         """定时采样循环"""
         while True:
             # 对每个活跃窗口进行采样
-            for symbol, active_window in self.active_windows.items():
+            for symbol, active_window in list(self.active_windows.items()):
                 yes_token = active_window.get("yes_token_id")
                 no_token = active_window.get("no_token_id")
                 
@@ -330,96 +283,48 @@ class MarketDataRecorder:
                     continue
                 
                 # 获取最新价格
-                yes_mid = None
-                no_mid = None
-                yes_bid = None
-                yes_ask = None
-                no_bid = None
-                no_ask = None
+                sample = {
+                    "timestamp_ms": int(time.time() * 1000),
+                    "binance_price": binance_price,
+                    "yes_mid_price": None,
+                    "no_mid_price": None,
+                    "yes_best_bid": None,
+                    "yes_best_ask": None,
+                    "no_best_bid": None,
+                    "no_best_ask": None
+                }
                 
                 # 如果 WebSocket 没有更新，通过 REST API 获取
                 try:
                     if yes_token:
                         if yes_token in self.latest_yes_prices:
-                            yes_mid = self.latest_yes_prices[yes_token]
+                            sample["yes_mid_price"] = self.latest_yes_prices[yes_token]
                         else:
-                            yes_mid = self.clob_client.get_midpoint(yes_token)
+                            sample["yes_mid_price"] = self.clob_client.get_midpoint(yes_token)
                         
                         price_resp = self.clob_client.get_price(yes_token, "BUY")
-                        yes_ask = float(price_resp)
+                        sample["yes_best_ask"] = float(price_resp)
                         price_resp = self.clob_client.get_price(yes_token, "SELL")
-                        yes_bid = float(price_resp)
+                        sample["yes_best_bid"] = float(price_resp)
                 except Exception as e:
                     print(f"[RECORDER] Error fetching {symbol} YES price: {e}")
                 
                 try:
                     if no_token:
                         if no_token in self.latest_no_prices:
-                            no_mid = self.latest_no_prices[no_token]
+                            sample["no_mid_price"] = self.latest_no_prices[no_token]
                         else:
-                            no_mid = self.clob_client.get_midpoint(no_token)
+                            sample["no_mid_price"] = self.clob_client.get_midpoint(no_token)
                         
                         price_resp = self.clob_client.get_price(no_token, "BUY")
-                        no_ask = float(price_resp)
+                        sample["no_best_ask"] = float(price_resp)
                         price_resp = self.clob_client.get_price(no_token, "SELL")
-                        no_bid = float(price_resp)
+                        sample["no_best_bid"] = float(price_resp)
                 except Exception as e:
                     print(f"[RECORDER] Error fetching {symbol} NO price: {e}")
                 
-                # 保存采样到数据库
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                
-                # 先获取 window_id
-                cursor.execute("""
-                    SELECT id FROM market_windows WHERE symbol=? AND start_time=?
-                """, (symbol, active_window["start_time"]))
-                res = cursor.fetchone()
-                if res:
-                    window_id = res[0]
-                else:
-                    # 插入新窗口
-                    cursor.execute("""
-                        INSERT INTO market_windows
-                        (symbol, condition_id, yes_token_id, no_token_id, start_time, end_time, strike_price, final_result, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        symbol,
-                        active_window.get("condition_id"),
-                        yes_token,
-                        no_token,
-                        active_window["start_time"],
-                        0,
-                        active_window["strike_price"],
-                        None,
-                        int(time.time())
-                    ))
-                    window_id = cursor.lastrowid
-                    conn.commit()
-                
-                # 插入采样
-                try:
-                    cursor.execute("""
-                        INSERT INTO samples
-                        (window_id, timestamp, binance_price, yes_mid_price, no_mid_price, yes_best_bid, yes_best_ask, no_best_bid, no_best_ask)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        window_id,
-                        int(time.time() * 1000),
-                        binance_price,
-                        yes_mid,
-                        no_mid,
-                        yes_bid,
-                        yes_ask,
-                        no_bid,
-                        no_ask
-                    ))
-                    conn.commit()
-                except Exception as e:
-                    print(f"[RECORDER] Error inserting sample: {e}")
-                    conn.rollback()
-                
-                conn.close()
+                # 添加采样到当前窗口
+                active_window["samples"].append(sample)
             
             time.sleep(self.sample_interval)
     
@@ -444,7 +349,7 @@ class MarketDataRecorder:
             api_passphrase=self.api_passphrase,
             on_price_change=self._on_polymarket_price_update
         )
-        self.polymarket_ws.subscribe_markets(all_tokens)
+        # 新token会动态订阅，启动时不用订阅
         self.polymarket_ws.start_heartbeat()
         
         # 启动采样循环
@@ -454,35 +359,7 @@ class MarketDataRecorder:
         sample_thread.start()
         
         print("\n[RECORDER] All started! Recording data...")
-    
-    def export_to_csv(self, output_path: str = "polymarket_data_export.csv") -> None:
-        """导出所有数据到CSV文件"""
-        import csv
-        
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # 连接窗口和采样数据
-        cursor.execute("""
-            SELECT 
-                mw.id, mw.symbol, mw.start_time, mw.end_time, mw.strike_price, 
-                mw.final_result, s.timestamp, s.binance_price, 
-                s.yes_mid_price, s.no_mid_price, 
-                s.yes_best_bid, s.yes_best_ask, s.no_best_bid, s.no_best_ask
-            FROM market_windows mw
-            LEFT JOIN samples s ON mw.id = s.window_id
-            ORDER BY mw.start_time DESC, s.timestamp ASC
-        """)
-        
-        columns = [desc[0] for desc in cursor.description]
-        
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(columns)
-            writer.writerows(cursor)
-        
-        conn.close()
-        print(f"[RECORDER] Data exported to {output_path}")
+        print(f"[RECORDER] Data will be saved to {self.data_dir}/<symbol>_windows.jsonl")
 
 
 def main():
