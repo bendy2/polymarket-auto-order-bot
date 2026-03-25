@@ -1,0 +1,32 @@
+{
+  "BTCUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  },
+  "ETHUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  },
+  "SOLUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  },
+  "XRPUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  },
+  "BNBUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  },
+  "DOGEUSDT": {
+    "yes_token_id": null,
+    "no_token_id": null,
+    "condition_id": null
+  }
+}
