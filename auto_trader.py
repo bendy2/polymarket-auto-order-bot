@@ -4,24 +4,24 @@ Polymarket 加密货币 UP/DOWN 自动交易策略
 基于 Binance K线价差自动下单
 
 策略逻辑:
-1. 订阅 Binance WebSocket 获取所有交易对 5m + 15m K线 (一共 7 * 2 = 14 个流)
-2. K线新开窗口 → 自动查询 Polymarket Gamma API 获取市场信息 (token_id / condition_id)，每个窗口只查询一次
+1. 订阅 Binance WebSocket 获取所有交易对 5m + 15m Kline (一共 7 * 2 = 14 个流)
+2. Kline新开窗口 → 自动查询 Polymarket Gamma API 获取市场信息 (token_id / condition_id)，每个窗口只查询一次
 3. 窗口结束前 N 秒 → 计算价差比例 (current_price - open_price) / open_price
-4. 如果价差比例绝对值 > 阈值 s → 下单: 正价差买 YES (UP), 负价差买 NO (DOWN)
-5. 使用 py-clob-client 提交市价单
+4. 如果价差比例绝对值 > 阈值 s → 加入待下单列表，批量提交
+5. 使用 py-clob-client 批量提交 GTC 限价单，价格用当前中间价
 """
 import os
 import json
 import time
 import threading
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
 from dotenv import load_dotenv
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client.order_builder.constants import BUY
 
 import websocket
 
@@ -43,6 +43,7 @@ class AutoTrader:
     SPREAD_THRESHOLD = float(os.getenv("SPREAD_THRESHOLD", "0.02"))  # 价差阈值 2%
     ORDER_AMOUNT_USD = float(os.getenv("ORDER_AMOUNT_USD", "10"))  # 每次下单金额 USD
     LAST_SECONDS_N = int(os.getenv("LAST_SECONDS_N", "60"))  # 窗口结束前 N 秒触发下单
+    CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", "0.1"))  # 主线程检查间隔 0.1 秒
     
     GAMMA_API_BASE = "https://gamma-api.polymarket.com"
     
@@ -53,6 +54,7 @@ class AutoTrader:
         self.spread_threshold = float(os.getenv("SPREAD_THRESHOLD", "0.02"))
         self.order_amount = float(os.getenv("ORDER_AMOUNT_USD", "10"))
         self.trigger_before_seconds = int(os.getenv("LAST_SECONDS_N", "60"))
+        self.check_interval = float(os.getenv("CHECK_INTERVAL", "0.1"))
         
         # 初始化 Polymarket 客户端
         self.host = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
@@ -65,7 +67,7 @@ class AutoTrader:
         self.client: Optional[ClobClient] = None
         self._init_clob()
         
-        # K线数据缓存: (symbol, interval) -> kline_data
+        # Kline数据缓存: (symbol, interval) -> kline_data
         # kline_data: {
         #   "start_time": int,  # ms
         #   "end_time": int,    # ms
@@ -188,7 +190,7 @@ class AutoTrader:
             
             with self._lock:
                 # 新开窗口
-                if symbol in [s for s, i in self.kline_cache.keys()] and interval in [i for s, i in self.kline_cache.keys()]:
+                if (symbol, interval) in self.kline_cache:
                     existing = self.kline_cache.get((symbol, interval))
                     if existing and existing["start_time"] != start_time:
                         # 窗口已关闭，新开窗口
@@ -225,7 +227,9 @@ class AutoTrader:
             print(f"[TRADER] Error processing kline: {e}")
     
     def _check_and_trade(self):
-        """定时检查，满足条件下单"""
+        """定时检查，满足条件收集订单，批量提交"""
+        pending_orders: List[Tuple[str, float, float]] = []  # [(token_id, price, size), ...]
+        
         with self._lock:
             now = int(time.time() * 1000)  # ms
             
@@ -235,9 +239,10 @@ class AutoTrader:
                     continue
                 
                 end_time = kline["end_time"]
-                # 是否到触发时间：还剩 N 秒以内结束
                 trigger_before_ms = self.trigger_before_seconds * 1000
                 time_to_end = end_time - now
+                
+                # 是否到触发时间：还剩 N 秒以内结束
                 if 0 < time_to_end <= trigger_before_ms:
                     open_price = kline["open"]
                     current_close = kline["current_close"]
@@ -251,43 +256,50 @@ class AutoTrader:
                     print(f"[TRADER] Checking {symbol} {interval}: spread={spread:.4f} threshold={self.spread_threshold}")
                     
                     if spread_abs >= self.spread_threshold:
-                        # 满足条件，下单
-                        yes_token_id = kline["yes_token_id"]
-                        no_token_id = kline["no_token_id"]
-                        
+                        # 获取 token
+                        token_id = None
                         if spread > 0:
                             # 上涨 → 买 YES (UP)
-                            token_id = yes_token_id
-                            side = BUY
-                            direction = "UP (YES)"
+                            token_id = kline["yes_token_id"]
                         else:
                             # 下跌 → 买 NO (DOWN)
-                            token_id = no_token_id
-                            side = BUY
-                            direction = "DOWN (NO)"
+                            token_id = kline["no_token_id"]
                         
-                        print(f"[TRADER] Placing order: {symbol} {interval} → {direction}, amount=${self.order_amount}")
-                        self._place_order(token_id, self.order_amount, side)
+                        # 获取当前中间价
+                        try:
+                            mid_price = self.client.get_midpoint(token_id)
+                            # 计算 size = order_amount / price  (Polymarket 计价方式：size = USD / price)
+                            size = self.order_amount / mid_price
+                            pending_orders.append((token_id, mid_price, size))
+                            
+                            direction = "UP (YES)" if spread > 0 else "DOWN (NO)"
+                            print(f"[TRADER] Pending {symbol} {interval} → {direction} @ {mid_price:.3f} size={size:.2f}")
+                        
+                        except Exception as e:
+                            print(f"[TRADER] Failed to get midprice for {token_id}: {e}")
                         
                         # 标记已下单
                         kline["triggered"] = True
-                    else:
-                        # 不满足阈值，跳过
-                        pass
+        
+        # 批量提交所有待下单
+        if pending_orders:
+            print(f"[TRADER] Batch placing {len(pending_orders)} GTC orders...")
+            for (token_id, price, size) in pending_orders:
+                self._place_gtc_limit_order(token_id, price, size, BUY)
     
-    def _place_order(self, token_id: str, amount_usd: float, side: str):
-        """下市价单"""
+    def _place_gtc_limit_order(self, token_id: str, price: float, size: float, side: str):
+        """下 GTC 限价单"""
         try:
-            order_args = MarketOrderArgs(
+            order_args = OrderArgs(
                 token_id=token_id,
-                amount=amount_usd,
-                side=side,
-                order_type=OrderType.FOK
+                price=price,
+                size=size,
+                side=side
             )
-            signed_order = self.client.create_market_order(order_args)
-            resp = self.client.post_order(signed_order, orderType=OrderType.FOK)
+            signed_order = self.client.create_order(order_args)
+            resp = self.client.post_order(signed_order, orderType=OrderType.GTC)
             
-            print(f"[TRADER] Order placed: {resp}")
+            print(f"[TRADER] GTC order placed: token={token_id} price={price:.3f} size={size:.2f} → {resp}")
             return resp
         
         except Exception as e:
@@ -310,7 +322,7 @@ class AutoTrader:
     def start(self):
         """启动交易机器人"""
         # 构建 Binance WebSocket 端点
-        # wss://stream.binance.com:9443/ws/{symbol}@kline_{interval}
+        # wss://stream.binance.com:9443/stream?streams=...
         streams = []
         for symbol in self.SYMBOLS:
             for interval in self.INTERVALS:
@@ -318,6 +330,7 @@ class AutoTrader:
         
         ws_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
         print(f"[TRADER] Connecting to Binance WebSocket: {len(streams)} streams")
+        print(f"[TRADER] Checking interval: {self.check_interval}s")
         
         self.ws = websocket.WebSocketApp(
             ws_url,
@@ -332,10 +345,10 @@ class AutoTrader:
         ws_thread.start()
         
         # 主线程定时检查交易
-        print("[TRADER] Started checking for trading opportunities every 10 seconds")
+        print(f"[TRADER] Started checking for trading opportunities every {self.check_interval} seconds")
         try:
             while self.running:
-                time.sleep(10)
+                time.sleep(self.check_interval)
                 self._check_and_trade()
         except KeyboardInterrupt:
             print("\n[TRADER] Stopping...")
