@@ -284,26 +284,34 @@ class AutoTrader:
         # 批量提交所有待下单
         if pending_orders:
             print(f"[TRADER] Batch placing {len(pending_orders)} GTC orders...")
-            for (token_id, price, size) in pending_orders:
-                self._place_gtc_limit_order(token_id, price, size, BUY)
+            self._batch_place_gtc_orders(pending_orders)
     
-    def _place_gtc_limit_order(self, token_id: str, price: float, size: float, side: str):
-        """下 GTC 限价单"""
+    def _batch_place_gtc_orders(self, pending_orders: List[Tuple[str, float, float]]):
+        """批量提交多个 GTC 限价单"""
         try:
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=price,
-                size=size,
-                side=side
-            )
-            signed_order = self.client.create_order(order_args)
-            resp = self.client.post_order(signed_order, orderType=OrderType.GTC)
+            signed_orders = []
+            for (token_id, price, size) in pending_orders:
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=BUY
+                )
+                signed = self.client.create_order(order_args)
+                signed_orders.append(signed)
             
-            print(f"[TRADER] GTC order placed: token={token_id} price={price:.3f} size={size:.2f} → {resp}")
+            if not signed_orders:
+                return []
+            
+            resp = self.client.post_orders(signed_orders, OrderType.GTC)
+            for i, order_resp in enumerate(resp):
+                token_id, price, size = pending_orders[i]
+                print(f"[TRADER] GTC order placed: token={token_id} price={price:.3f} size={size:.2f} → {order_resp}")
+            
             return resp
         
         except Exception as e:
-            print(f"[TRADER] Error placing order: {e}")
+            print(f"[TRADER] Error batch placing orders: {e}")
             return None
     
     def _on_open(self, ws):
