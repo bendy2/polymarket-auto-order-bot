@@ -42,7 +42,7 @@ class AutoTrader:
     # 策略参数 (可以通过环境变量覆盖)
     SPREAD_THRESHOLD = float(os.getenv("SPREAD_THRESHOLD", "0.02"))  # 价差阈值 2%
     ORDER_AMOUNT_USD = float(os.getenv("ORDER_AMOUNT_USD", "10"))  # 每次下单金额 USD
-    LAST_MINUTES_N = int(os.getenv("LAST_MINUTES_N", "1"))  # 窗口结束前 N 分钟触发下单
+    LAST_SECONDS_N = int(os.getenv("LAST_SECONDS_N", "60"))  # 窗口结束前 N 秒触发下单
     
     GAMMA_API_BASE = "https://gamma-api.polymarket.com"
     
@@ -52,7 +52,7 @@ class AutoTrader:
         # 加载配置
         self.spread_threshold = float(os.getenv("SPREAD_THRESHOLD", "0.02"))
         self.order_amount = float(os.getenv("ORDER_AMOUNT_USD", "10"))
-        self.trigger_before_minutes = int(os.getenv("LAST_MINUTES_N", "1"))
+        self.trigger_before_seconds = int(os.getenv("LAST_SECONDS_N", "60"))
         
         # 初始化 Polymarket 客户端
         self.host = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
@@ -235,10 +235,9 @@ class AutoTrader:
                     continue
                 
                 end_time = kline["end_time"]
-                trigger_before_ms = self.trigger_before_minutes * 60 * 1000
+                # 是否到触发时间：还剩 N 秒以内结束
+                trigger_before_ms = self.trigger_before_seconds * 1000
                 time_to_end = end_time - now
-                
-                # 是否到触发时间：还剩 N 分钟以内结束
                 if 0 < time_to_end <= trigger_before_ms:
                     open_price = kline["open"]
                     current_close = kline["current_close"]
