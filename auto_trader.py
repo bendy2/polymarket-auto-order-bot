@@ -41,7 +41,8 @@ class AutoTrader:
     
     # 策略参数 (可以通过环境变量覆盖)
     SPREAD_THRESHOLD = float(os.getenv("SPREAD_THRESHOLD", "0.02"))  # 价差阈值 2%
-    ORDER_AMOUNT_USD = float(os.getenv("ORDER_AMOUNT_USD", "10"))  # 每次下单金额 USD
+    ORDER_PRICE = float(os.getenv("ORDER_PRICE", "0.5"))  # 固定限价单价格 (0-1)
+    ORDER_SIZE = float(os.getenv("ORDER_SIZE", "10"))  # 固定下单 size
     LAST_SECONDS_N = int(os.getenv("LAST_SECONDS_N", "60"))  # 窗口结束前 N 秒触发下单
     CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", "0.1"))  # 主线程检查间隔 0.1 秒
     
@@ -52,7 +53,8 @@ class AutoTrader:
         
         # 加载配置
         self.spread_threshold = float(os.getenv("SPREAD_THRESHOLD", "0.02"))
-        self.order_amount = float(os.getenv("ORDER_AMOUNT_USD", "10"))
+        self.order_price = float(os.getenv("ORDER_PRICE", "0.5"))
+        self.order_size = float(os.getenv("ORDER_SIZE", "10"))
         self.trigger_before_seconds = int(os.getenv("LAST_SECONDS_N", "60"))
         self.check_interval = float(os.getenv("CHECK_INTERVAL", "0.1"))
         
@@ -265,18 +267,11 @@ class AutoTrader:
                             # 下跌 → 买 NO (DOWN)
                             token_id = kline["no_token_id"]
                         
-                        # 获取当前中间价
-                        try:
-                            mid_price = self.client.get_midpoint(token_id)
-                            # 计算 size = order_amount / price  (Polymarket 计价方式：size = USD / price)
-                            size = self.order_amount / mid_price
-                            pending_orders.append((token_id, mid_price, size))
-                            
-                            direction = "UP (YES)" if spread > 0 else "DOWN (NO)"
-                            print(f"[TRADER] Pending {symbol} {interval} → {direction} @ {mid_price:.3f} size={size:.2f}")
+                        # 使用固定价格固定size
+                        pending_orders.append((token_id, self.order_price, self.order_size))
                         
-                        except Exception as e:
-                            print(f"[TRADER] Failed to get midprice for {token_id}: {e}")
+                        direction = "UP (YES)" if spread > 0 else "DOWN (NO)"
+                        print(f"[TRADER] Pending {symbol} {interval} → {direction} @ {self.order_price:.3f} size={self.order_size:.2f}")
                         
                         # 标记已下单
                         kline["triggered"] = True
